@@ -32,6 +32,8 @@ pub(crate) struct SeqState {
     pub epoch: u64,
     pub emitted: HashSet<u64>,
     pub started: bool,
+    /// Last track known to be described (skips the hash lookup).
+    pub last_track: u64,
 }
 
 impl SeqState {
@@ -42,12 +44,14 @@ impl SeqState {
             self.epoch = epoch;
             self.emitted.clear();
             self.started = false;
+            self.last_track = 0;
             return true;
         }
         if self.epoch != epoch {
             self.epoch = epoch;
             self.emitted.clear();
             self.started = false;
+            self.last_track = 0;
         }
         false
     }
@@ -69,11 +73,22 @@ struct Registry {
     writers: Vec<Arc<Mutex<ThreadWriter>>>,
     free_ids: Vec<u16>,
     next_id: u16,
+    /// Next SMB chunk id per writer id. traced keys chunks by
+    /// (producer, writer_id, chunk_id), so a writer id reused by a new thread
+    /// must continue the old numbering instead of restarting at 0.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    chunk_ids: std::collections::HashMap<u16, u32>,
 }
 
 fn registry() -> &'static Mutex<Registry> {
     static R: OnceLock<Mutex<Registry>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(Registry { writers: Vec::new(), free_ids: Vec::new(), next_id: 1 }))
+    R.get_or_init(|| Mutex::new(Registry {
+            writers: Vec::new(),
+            free_ids: Vec::new(),
+            next_id: 1,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            chunk_ids: Default::default(),
+        }))
 }
 
 struct TlsHolder(Arc<Mutex<ThreadWriter>>);
@@ -86,9 +101,11 @@ impl Drop for TlsHolder {
         }
         let mut reg = registry().lock().unwrap();
         reg.writers.retain(|x| !Arc::ptr_eq(x, &self.0));
-        let id = self.0.lock().unwrap().id;
-        if id != 0 {
-            reg.free_ids.push(id);
+        let w = self.0.lock().unwrap();
+        if w.id != 0 {
+            reg.free_ids.push(w.id);
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            reg.chunk_ids.insert(w.id, w.sys.next_chunk_id());
         }
     }
 }
@@ -113,6 +130,8 @@ fn new_writer() -> Arc<Mutex<ThreadWriter>> {
     };
     let mut pkt = TracePacket::default();
     pkt.track_event = Some(TrackEvent::default());
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let next_chunk_id = reg.chunk_ids.get(&id).copied().unwrap_or(0);
     let w = Arc::new(Mutex::new(ThreadWriter {
         id,
         tid,
@@ -122,7 +141,7 @@ fn new_writer() -> Arc<Mutex<ThreadWriter>> {
         inproc: SeqState::default(),
         inproc_buf: Vec::new(),
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        sys: system::SysWriter::default(),
+        sys: system::SysWriter::with_next_chunk_id(next_chunk_id),
     }));
     reg.writers.push(w.clone());
     w
@@ -132,11 +151,9 @@ fn new_writer() -> Arc<Mutex<ThreadWriter>> {
 /// teardown (TLS already destroyed).
 pub(crate) fn with_writer<R>(f: impl FnOnce(&mut ThreadWriter) -> R) -> Option<R> {
     TW.try_with(|cell| {
-        let arc = {
-            let mut slot = cell.borrow_mut();
-            slot.get_or_insert_with(|| TlsHolder(new_writer())).0.clone()
-        };
-        let mut w = arc.lock().unwrap();
+        let mut slot = cell.borrow_mut();
+        let holder = slot.get_or_insert_with(|| TlsHolder(new_writer()));
+        let mut w = holder.0.lock().unwrap();
         f(&mut w)
     })
     .ok()
@@ -156,8 +173,12 @@ pub(crate) fn set_thread_name(name: &str) {
         track::register_thread(platform::pid(), w.tid, name);
         let u = w.thread_uuid;
         w.inproc.emitted.remove(&u);
+        w.inproc.last_track = 0;
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        w.sys.seq.emitted.remove(&u);
+        {
+            w.sys.seq.emitted.remove(&u);
+            w.sys.seq.last_track = 0;
+        }
     });
 }
 
@@ -259,7 +280,11 @@ impl ThreadWriter {
             };
             out.push(p.encode_to_vec());
         }
+        if seq.last_track == track_uuid {
+            return;
+        }
         if seq.emitted.contains(&track_uuid) {
+            seq.last_track = track_uuid;
             return;
         }
         for uuid in track::ancestry(track_uuid).into_iter().rev() {
@@ -270,6 +295,7 @@ impl ThreadWriter {
                 }
             }
         }
+        seq.last_track = track_uuid;
     }
 
     pub(crate) fn emit(&mut self, sinks: u8, ts: u64, ev: &EventSpec) {

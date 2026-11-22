@@ -65,7 +65,7 @@ pub(crate) fn frame_packet(out: &mut Vec<u8>, pkt: &[u8], writer_id: u16) {
 }
 
 pub(crate) fn submit(gen: u64, buf: &mut Vec<u8>) {
-    let block = std::mem::take(buf);
+    let block = std::mem::replace(buf, Vec::with_capacity(thread_buf_flush() + 4096));
     let mut guard = STORE.lock().unwrap();
     let Some(st) = guard.as_mut() else { return };
     if st.gen != gen || block.is_empty() {

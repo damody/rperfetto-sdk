@@ -147,6 +147,14 @@ pub(crate) struct SysWriter {
 }
 
 impl SysWriter {
+    pub(crate) fn with_next_chunk_id(next_chunk_id: u32) -> Self {
+        SysWriter { next_chunk_id, ..Default::default() }
+    }
+
+    pub(crate) fn next_chunk_id(&self) -> u32 {
+        self.next_chunk_id
+    }
+
     pub(crate) fn sync(&mut self, st: &Active) {
         self.seq.sync(st.gen, st.epoch.load(Ordering::Relaxed));
         let same_smb = self.smb.as_ref().is_some_and(|s| Arc::ptr_eq(s, &st.smb));
@@ -187,6 +195,7 @@ impl SysWriter {
                 self.dropping = true;
                 // Descriptors may have been lost; re-emit them.
                 self.seq.emitted.clear();
+                self.seq.last_track = 0;
             }
         } else {
             self.dropping = false;
