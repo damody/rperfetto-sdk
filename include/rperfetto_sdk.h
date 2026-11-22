@@ -221,6 +221,18 @@ void rpf_counter_i64(RpfCategory cat, uint64_t counter_track, int64_t value);
 void rpf_counter_f64(RpfCategory cat, uint64_t counter_track, double value);
 
 /**
+ * Function entry: begins a slice on the calling thread. `cat` may be NULL
+ * for the default "fn" category. Pair with rpf_func_end(). Safe to call from
+ * `__cyg_profile_func_enter` (see examples/c/instrument_hooks.c).
+ */
+void rpf_func_begin(RpfCategory cat, const char *name);
+
+/**
+ * Function exit: ends the innermost rpf_func_begin() slice of this thread.
+ */
+void rpf_func_end(void);
+
+/**
  * Pushes the calling thread's buffered events to the backends.
  */
 void rpf_flush_current_thread(void);

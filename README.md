@@ -165,6 +165,7 @@ cargo run --example rust_demo -- out.pftrace          # in-process
 cargo run --example rust_demo -- --system 10          # 寫進正在跑的 traced session
 cargo run --example rust_demo -- --atrace 10          # ATRACE
 examples/c/build/c_demo out.pftrace                   # C：同樣支援 --system / --atrace
+cargo run --release --example fn_mips_demo -- --system 10   # 函數 MIPS（見下節）
 cargo run --release --example bench                   # 每事件成本
 ```
 
@@ -186,6 +187,8 @@ ATRACE 則需要 `ftrace_config { ftrace_events: "ftrace/print" }`。
   若有 `trace_processor_shell`（`$TRACE_PROCESSOR_SHELL`，預設 `perfetto-arm64/out/linux_release`），
   驗 slice 名稱／深度／category／track、參數、counter、process 名、stats 無 error/data_loss。
 * `tests/proto_compat.rs`：100+ 個欄位號碼對照 perfetto v53.1 `.proto`（`$PERFETTO_SRC`）。
+* `tests/func.rs`：`trace_fn!`／`func_begin`／`func_end` 的配對（category 中途切換、多餘的 end），
+  以及 `sql/function_mips.sql` 在 trace_processor 上能執行。
 * `tests/system_linux.rs`：啟動私有 `traced` + `perfetto` client，驗證 system 後端端到端
   （TrackEventConfig 過濾、6KB 封包跨 chunk、短命執行緒 writer id 回收、無 ABI violation）。
 
@@ -195,6 +198,67 @@ ATRACE 則需要 `ftrace_config { ftrace_events: "ftrace/print" }`。
   slice 的 tid/pid 對到 kernel 的 thread／process，busy-wait slice 期間 sched 顯示該執行緒約 94% 時間在 CPU 上
   （`sched` 與 slice 同為 BOOTTIME 時間軸）。
 * ATRACE：B/E、I、G/H（自訂 track）、C（counter）皆被 trace_processor 正確解析。
+
+## 函數 MIPS（不需 root、不讀 perf counter）
+
+App 端只標函數開頭／結尾（category `fn` 的 slice），**不讀任何 CPU 計數器**，所以不需要 root，也不需要
+perf 權限。MIPS 由系統 trace 算：traced_perf 錄每顆 CPU 的 `instructions`／`cycles`，
+`sql/function_mips.sql` 再依 sched 分攤到各函數 slice。做法跟 FPSGO 的「Game Thread MIPS」／`mtk_cpu_counter_interval` 相同。
+
+標記方式：
+
+* Rust：在函數開頭寫 `trace_fn!();`（slice 名稱自動取 `module::func`），也可寫 `trace_fn!(CAT, "name")`；
+  或手動呼叫 `func::func_begin(&CAT, name)`／`func::func_end()`、`func::func_scope`。
+* C：`rpf_func_begin(cat_or_NULL, name)`／`rpf_func_end()`。
+* C/C++ 自動插樁：用 `-finstrument-functions` 編譯要量的程式碼，並連結
+  [`examples/c/instrument_hooks.c`](examples/c/instrument_hooks.c)（實作 `__cyg_profile_func_enter/exit`，
+  用 `dladdr` 取函數名；需 `-rdynamic`／`-Wl,--export-dynamic`），然後呼叫 `rpf_instrument_enable(NULL)`。
+  範例：[`examples/c/fn_mips_demo.c`](examples/c/fn_mips_demo.c)、[`examples/fn_mips_demo.rs`](examples/fn_mips_demo.rs)。
+
+錄製與分析：
+
+```bash
+adb shell setprop persist.traced.enable 1
+```
+
+```bash
+adb shell setprop persist.traced_perf.enable 1
+```
+
+```bash
+adb shell perfetto --txt -c - -o /data/misc/perfetto-traces/fn.pftrace < configs/function_mips.cfg
+```
+
+```bash
+trace_processor_shell -q sql/function_mips.sql fn.pftrace
+```
+
+（`setprop` 那兩步只有 traced 預設沒開的裝置才需要，而且要 root；錄製本身用 shell 身分就可以。）
+
+輸出 `function_mips`（每次呼叫一列）與 `function_mips_summary`（依函數名彙總）：`instructions`（含被呼叫者）、
+`self_instructions`、`mips`（指令數／牆鐘時間）、`mips_cpu`（指令數／實際在 CPU 上的時間）、`ipc`、
+`est_mcycles`（Σ 執行時間 × CPU 頻率，沒有 PMU 時也能用）。
+
+`configs/function_mips.cfg` 的重點：
+
+* `linux.perf` 用 `SW_CPU_CLOCK` 4 kHz 當 timebase，`HW_INSTRUCTIONS`／`HW_CPU_CYCLES` 當 follower（CPU-wide）。
+  **不能設 `timestamp_clock: PERF_CLOCK_BOOTTIME`**：硬體 follower 用 BOOTTIME 會讓 perf_event_open 失敗，
+  traced_perf 會直接丟掉這個 data source。用預設時鐘就好，trace_processor 會自動換算。
+* cpu-clock 在 CPU idle 時不會觸發取樣，所以一個取樣區間可能橫跨 idle 時間。SQL 把每段的指令數只攤到該 CPU
+  在區間內實際有排程的時間；直接用牆鐘時間平均攤，會把工作量抹到 idle 上。
+* 計數是 per-CPU、user＋kernel 都算，所以執行緒執行期間 kernel 代它做的工作也會算進去。
+
+手機實測（k6995v1_64，user build，**app 與錄製都以 shell uid 執行**）：
+
+| 函數 | SQL `mips` | 原始 4 kHz 區間 MIPS | SQL `ipc` |
+|---|---|---|---|
+| `alu_work`（相依整數運算） | 7993 | 8483 | 1.69 |
+| `fp_work`（sqrt/div 鏈） | 1145 | 953 | 0.27 |
+| `pointer_chase`（64 MiB 隨機存取） | 242 | 197 | 0.09 |
+| `frame`（以上全部加 sleep） | 1280 | — | 0.51 |
+
+每個 frame 的總指令數 2060 萬，跟 `simpleperf stat` 量到的 2060 萬一致。解析度受取樣週期（250 µs）限制：
+比幾個取樣週期還短的函數，量會跟相鄰函數混在一起（上表 pointer_chase 偏高，就是混到前面 alu_work 的量）。
 
 ## 效能
 

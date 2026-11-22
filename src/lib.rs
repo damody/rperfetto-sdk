@@ -31,6 +31,7 @@ mod category;
 mod event;
 pub mod ffi;
 mod inprocess;
+pub mod func;
 mod platform;
 pub mod protos;
 #[cfg(any(target_os = "linux", target_os = "android"))]

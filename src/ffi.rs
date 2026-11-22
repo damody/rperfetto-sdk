@@ -298,6 +298,22 @@ pub unsafe extern "C" fn rpf_counter_f64(cat: RpfCategory, counter_track: u64, v
     }
 }
 
+/// Function entry: begins a slice on the calling thread. `cat` may be NULL
+/// for the default "fn" category. Pair with rpf_func_end(). Safe to call from
+/// `__cyg_profile_func_enter` (see examples/c/instrument_hooks.c).
+#[no_mangle]
+pub unsafe extern "C" fn rpf_func_begin(cat: RpfCategory, name: *const c_char) {
+    let c = cat_ref(cat).unwrap_or(&crate::func::FN_CATEGORY);
+    let name = cstr(name).unwrap_or_default();
+    crate::func::func_begin(c, &name);
+}
+
+/// Function exit: ends the innermost rpf_func_begin() slice of this thread.
+#[no_mangle]
+pub extern "C" fn rpf_func_end() {
+    crate::func::func_end();
+}
+
 /// Pushes the calling thread's buffered events to the backends.
 #[no_mangle]
 pub extern "C" fn rpf_flush_current_thread() {
