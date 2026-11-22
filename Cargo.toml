@@ -1,0 +1,19 @@
+[package]
+name = "rperfetto-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust Perfetto TrackEvent producer: in-process .pftrace writer, system (traced) producer and ATRACE backends, with a C API."
+license = "Apache-2.0"
+
+[lib]
+name = "rperfetto_sdk"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+prost = { version = "0.13", default-features = false, features = ["derive", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+debug = 1
