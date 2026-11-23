@@ -66,8 +66,9 @@ pub const COMPRESS_CHUNK: usize = 1024 * 1024;
 const COMPRESSED_PACKETS_FIELD: u32 = 50;
 
 /// Appends one framed `TracePacket { compressed_packets: zlib(framed) }` to `out`.
-/// `framed` must hold whole framed packets (a serialized `Trace`).
-fn append_compressed(out: &mut Vec<u8>, framed: &[u8]) {
+/// `framed` must hold whole framed packets (a serialized `Trace`); appending the result
+/// to a trace file adds those packets in compressed form.
+pub fn append_compressed(out: &mut Vec<u8>, framed: &[u8]) {
     use flate2::{write::ZlibEncoder, Compression as Level};
     let mut encoder = ZlibEncoder::new(Vec::with_capacity(framed.len() / 4), Level::default());
     encoder.write_all(framed).expect("writing to a Vec cannot fail");

@@ -45,7 +45,7 @@ pub use category::{registered_categories, Category, CategoryFilter};
 pub use clock::{Clock, Timestamp};
 pub use log::{android_logs, LogEvent, LogPriority};
 pub use event::{Arg, ArgValue, CounterValue};
-pub use inprocess::{read_packets, Compression, SessionConfig, SessionStats, TracingSession, COMPRESS_CHUNK};
+pub use inprocess::{append_compressed, read_packets, Compression, SessionConfig, SessionStats, TracingSession, COMPRESS_CHUNK};
 pub use platform::now_ns;
 pub use prost;
 pub use track::{CounterTrack, Track};
