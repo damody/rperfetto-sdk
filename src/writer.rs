@@ -365,3 +365,13 @@ pub(crate) fn emit_with_sinks(sinks: u8, ev: &EventSpec) {
         crate::atrace::emit(ev);
     }
 }
+
+/// Emits one event with a caller-supplied timestamp (same clock as
+/// [`platform::now_ns`]). Only the TrackEvent sinks (in-process, system) take
+/// explicit timestamps; ATRACE always stamps events itself and is skipped.
+#[inline]
+pub(crate) fn emit_with_sinks_at(sinks: u8, ts: u64, ev: &EventSpec) {
+    if sinks & (SINK_INPROC | SINK_SYSTEM) != 0 {
+        with_writer(|w| w.emit(sinks & (SINK_INPROC | SINK_SYSTEM), ts, ev));
+    }
+}

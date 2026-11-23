@@ -58,6 +58,16 @@ fn hash_str(seed: u64, s: &str) -> u64 {
 /// Process name override set through [`crate::InitArgs`].
 pub(crate) static PROCESS_NAME: RwLock<Option<String>> = RwLock::new(None);
 
+/// Sets the process name used by [`Track::process`]'s descriptor, also when the
+/// process track was already registered (e.g. by an earlier session).
+pub(crate) fn set_process_name(name: &str) {
+    *PROCESS_NAME.write().unwrap() = Some(name.to_string());
+    let uuid = process_uuid(platform::pid());
+    if let Some(info) = tracks().write().unwrap().get_mut(&uuid) {
+        info.name = name.to_string();
+    }
+}
+
 /// A track for slices and instants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Track {

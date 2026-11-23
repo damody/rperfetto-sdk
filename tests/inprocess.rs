@@ -220,3 +220,50 @@ fn discard_mode_stops_when_full() {
     let first = decode(&s.trace_bytes()).into_iter().find_map(|p| p.track_event).unwrap();
     assert_eq!(first.debug_annotations[0].int_value, Some(0));
 }
+
+#[test]
+fn explicit_timestamps_are_kept() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init();
+    let s = TracingSession::start(SessionConfig::default()).unwrap();
+    let base = pf::now_ns() + 1_000;
+    let frames = Track::named("Frames");
+    let fps = CounterTrack::with_unit("fps", "fps");
+    pf::slice_begin_on_at(&CAT_A, frames, base, "frame", &[Arg::new("ms", 16.6)]);
+    pf::slice_end_on_at(&CAT_A, frames, base + 16_600_000);
+    pf::instant_on_at(&CAT_A, frames, base + 20_000_000, "mark", &[]);
+    pf::counter_at(&CAT_A, fps, base + 100_000_000, 59.5);
+    pf::counter_at(&CAT_A, fps, base + 200_000_000, 60);
+    let mut s = s;
+    s.stop();
+    let events: Vec<(u64, i32)> = decode(&s.trace_bytes())
+        .into_iter()
+        .filter_map(|p| Some((p.timestamp?, p.track_event?.r#type?)))
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            (base, protos::TYPE_SLICE_BEGIN),
+            (base + 16_600_000, protos::TYPE_SLICE_END),
+            (base + 20_000_000, protos::TYPE_INSTANT),
+            (base + 100_000_000, protos::TYPE_COUNTER),
+            (base + 200_000_000, protos::TYPE_COUNTER),
+        ]
+    );
+}
+
+#[test]
+fn process_name_can_change_between_sessions() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let name_in = |bytes: &[u8]| {
+        decode(bytes).into_iter().find_map(|p| p.track_descriptor.and_then(|d| d.process).and_then(|p| p.process_name))
+    };
+    for name in ["first_proc", "second_proc"] {
+        pf::init(InitArgs { backends: Backends::IN_PROCESS, process_name: Some(name.into()), ..Default::default() }).unwrap();
+        let mut s = TracingSession::start(SessionConfig::default()).unwrap();
+        pf::instant_on(&CAT_A, Track::process(), "x", &[]);
+        s.stop();
+        assert_eq!(name_in(&s.trace_bytes()).as_deref(), Some(name));
+    }
+    init();
+}

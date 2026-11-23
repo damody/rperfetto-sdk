@@ -36,6 +36,11 @@ pub const TRACE_CLOCK_ID: u32 = if cfg!(any(target_os = "linux", target_os = "an
 pub fn clock_snapshot() -> Vec<(u32, u64)> {
     #[allow(unused_mut)]
     let mut v = vec![(TRACE_CLOCK_ID, now_ns())];
+    // TrackEvent packets carry no clock id, and trace_processor reads them as BOOTTIME.
+    // Without a BOOTTIME entry it cannot convert them and drops every event
+    // (`clock_sync_failure_unknown_source_clock`), so alias the monotonic clock.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    v.push((crate::protos::BUILTIN_CLOCK_BOOTTIME, v[0].1));
     #[cfg(any(target_os = "linux", target_os = "android"))]
     unsafe {
         for (id, clk) in [
