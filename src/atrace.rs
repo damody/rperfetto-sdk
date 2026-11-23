@@ -72,7 +72,7 @@ mod imp {
         let track_name: Option<String> = match &info {
             None => None,
             Some(i) => match i.kind {
-                TrackKind::Thread { tid } if tid == platform::tid() => None,
+                TrackKind::Thread { pid: p, tid } if p == pid && tid == platform::tid() => None,
                 _ => Some(i.name.clone()),
             },
         };

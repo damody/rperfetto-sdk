@@ -32,15 +32,27 @@ pub const TRACE_CLOCK_ID: u32 = if cfg!(any(target_os = "linux", target_os = "an
     crate::protos::BUILTIN_CLOCK_MONOTONIC
 };
 
-/// Snapshot of (clock id, timestamp) pairs for the in-process trace header.
+/// `timestamp_clock_id` for packets stamped with [`now_ns`]. Linux/Android
+/// leave it unset (Perfetto's default trace clock is BOOTTIME); elsewhere
+/// packets say MONOTONIC explicitly, so BOOTTIME stays free for device clocks.
+pub(crate) const SDK_PACKET_CLOCK: Option<u32> = if cfg!(any(target_os = "linux", target_os = "android")) {
+    None
+} else {
+    Some(crate::protos::BUILTIN_CLOCK_MONOTONIC)
+};
+
+/// Snapshot of (clock id, timestamp) pairs for the in-process trace header:
+/// the SDK clock plus REALTIME (and MONOTONIC on Linux/Android).
 pub fn clock_snapshot() -> Vec<(u32, u64)> {
     #[allow(unused_mut)]
     let mut v = vec![(TRACE_CLOCK_ID, now_ns())];
-    // TrackEvent packets carry no clock id, and trace_processor reads them as BOOTTIME.
-    // Without a BOOTTIME entry it cannot convert them and drops every event
-    // (`clock_sync_failure_unknown_source_clock`), so alias the monotonic clock.
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    v.push((crate::protos::BUILTIN_CLOCK_BOOTTIME, v[0].1));
+    {
+        let realtime = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        v.push((crate::protos::BUILTIN_CLOCK_REALTIME, realtime));
+    }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     unsafe {
         for (id, clk) in [

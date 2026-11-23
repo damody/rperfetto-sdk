@@ -35,6 +35,8 @@ pub struct TracePacket {
     pub track_descriptor: Option<TrackDescriptor>,
     #[prost(message, optional, tag = "6")]
     pub clock_snapshot: Option<ClockSnapshot>,
+    #[prost(message, optional, tag = "39")]
+    pub android_log: Option<AndroidLogPacket>,
     // oneof optional_trusted_packet_sequence_id. Only for in-process output:
     // traced rejects producer packets carrying it.
     #[prost(uint32, optional, tag = "10")]
@@ -69,6 +71,41 @@ pub mod clock_snapshot {
         pub clock_id: Option<u32>,
         #[prost(uint64, optional, tag = "2")]
         pub timestamp: Option<u64>,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// trace/android/android_log.proto, common/android_log_constants.proto
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Message)]
+pub struct AndroidLogPacket {
+    #[prost(message, repeated, tag = "1")]
+    pub events: Vec<android_log_packet::LogEvent>,
+}
+
+pub mod android_log_packet {
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct LogEvent {
+        /// `AndroidLogId`.
+        #[prost(int32, optional, tag = "1")]
+        pub log_id: Option<i32>,
+        #[prost(int32, optional, tag = "2")]
+        pub pid: Option<i32>,
+        #[prost(int32, optional, tag = "3")]
+        pub tid: Option<i32>,
+        #[prost(int32, optional, tag = "4")]
+        pub uid: Option<i32>,
+        /// CLOCK_REALTIME nanoseconds.
+        #[prost(uint64, optional, tag = "5")]
+        pub timestamp: Option<u64>,
+        #[prost(string, optional, tag = "6")]
+        pub tag: Option<String>,
+        /// `AndroidLogPriority`.
+        #[prost(int32, optional, tag = "7")]
+        pub prio: Option<i32>,
+        #[prost(string, optional, tag = "8")]
+        pub message: Option<String>,
     }
 }
 

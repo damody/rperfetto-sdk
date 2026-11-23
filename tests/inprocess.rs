@@ -267,3 +267,93 @@ fn process_name_can_change_between_sessions() {
     }
     init();
 }
+
+/// Packets inside `compressed_packets` (field 50), plus the plain ones. Walks the raw
+/// framing because prost drops fields it does not know.
+fn inflate_all(bytes: &[u8]) -> (usize, Vec<TracePacket>) {
+    use prost::encoding::{decode_key, decode_varint, WireType};
+    use std::io::Read;
+    fn split(mut b: &[u8]) -> Vec<(u32, &[u8])> {
+        let mut out = Vec::new();
+        while !b.is_empty() {
+            let (field, wire) = decode_key(&mut b).unwrap();
+            match wire {
+                WireType::LengthDelimited => {
+                    let len = decode_varint(&mut b).unwrap() as usize;
+                    out.push((field, &b[..len]));
+                    b = &b[len..];
+                }
+                WireType::Varint => {
+                    decode_varint(&mut b).unwrap();
+                }
+                other => panic!("unexpected wire type {other:?}"),
+            }
+        }
+        out
+    }
+    let mut compressed = 0;
+    let mut out = Vec::new();
+    for (_, packet) in split(bytes) {
+        match split(packet).into_iter().find(|(field, _)| *field == 50) {
+            Some((_, deflated)) => {
+                compressed += 1;
+                let mut inflated = Vec::new();
+                flate2::read::ZlibDecoder::new(deflated).read_to_end(&mut inflated).unwrap();
+                out.extend(decode(&inflated));
+            }
+            None => out.push(TracePacket::decode(packet).unwrap()),
+        }
+    }
+    (compressed, out)
+}
+
+#[test]
+fn zlib_compression_round_trips_in_memory_and_streaming() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init();
+    let emit = || {
+        let track = Track::named("Logs");
+        for i in 0..60_000 {
+            pf::instant_on(&CAT_A, track, "repeated log line text", &[Arg::new("i", i as i64)]);
+        }
+    };
+    let plain = {
+        let mut s = TracingSession::start(SessionConfig::default()).unwrap();
+        emit();
+        s.stop();
+        s.trace_bytes()
+    };
+    let memory = {
+        let mut s = TracingSession::start(SessionConfig { compression: pf::Compression::Zlib, ..Default::default() }).unwrap();
+        emit();
+        s.stop();
+        s.trace_bytes()
+    };
+    let path = std::env::temp_dir().join(format!("rperfetto_sdk_zlib_{}.pftrace", std::process::id()));
+    {
+        let mut s = TracingSession::start(SessionConfig {
+            compression: pf::Compression::Zlib,
+            output_file: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        emit();
+        s.stop();
+        assert!(s.file_error().is_none());
+    }
+    let streamed = std::fs::read(&path).unwrap();
+    let events = |packets: &[TracePacket]| packets.iter().filter(|p| p.track_event.is_some()).count();
+    let plain_events = events(&decode(&plain));
+    assert_eq!(plain_events, 60_000);
+    for bytes in [&memory, &streamed] {
+        assert!(bytes.len() * 5 < plain.len(), "{} vs {}", bytes.len(), plain.len());
+        let (chunks, packets) = inflate_all(bytes);
+        assert!(chunks >= 2, "expected several compressed chunks, got {chunks}");
+        assert_eq!(events(&packets), plain_events);
+        assert!(packets[0].clock_snapshot.is_some(), "header stays plain");
+    }
+    if tp_shell().is_some() {
+        assert_eq!(tp_query(&path, "select count(*) from slice"), vec![vec!["60000".to_string()]]);
+    }
+    let _ = std::fs::remove_file(&path);
+}

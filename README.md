@@ -113,6 +113,44 @@ pf::shutdown();
 * `SessionConfig { buffer_size_kb, ring_buffer, categories }`：ring buffer 滿了丟最舊、否則滿了停錄。
 * 時間：Linux/Android 用 `CLOCK_BOOTTIME`（Perfetto 預設 trace clock），與 sched 直接對齊。
 
+### 轉錄既有資料（指定時間戳、外部 process、Android log、串流寫檔）
+
+把別處錄好的資料（例如手機上的取樣、logcat、strace）轉成 trace 時用：
+
+```rust
+use rperfetto_sdk::{self as pf, Clock, CounterTrack, LogEvent, LogPriority, SessionConfig, Timestamp, Track, TracingSession};
+
+// 手機同一瞬間的 BOOTTIME／REALTIME 當 clock snapshot：REALTIME 事件會落在手機的 BOOTTIME 軸上，
+// 跟同一支手機錄的 system trace 對齊。串流模式邊錄邊寫檔，沒有緩衝上限。
+let session = TracingSession::start(SessionConfig {
+    clock_snapshot: Some(vec![(Clock::Boottime, phone_boot_ns), (Clock::Realtime, phone_epoch_ns)]),
+    output_file: Some("out.pftrace".into()),
+    ..Default::default()
+})?;
+
+let app = Track::process_of(4242, Some("com.example.game"));        // 別的 process
+let render = Track::thread_of(4242, 4243, Some("RenderThread"));     // 它的 thread
+pf::slice_begin_on_at(&GAME, render, Timestamp::realtime(epoch_ns), "draw", &[]);
+pf::slice_end_on_at(&GAME, render, Timestamp::realtime(epoch_ns + 16_000_000));
+pf::counter_at(&GAME, CounterTrack::with_parent("fps", app, Some("fps")), Timestamp::realtime(epoch_ns), 60.0);
+pf::android_logs(&GAME, &[LogEvent {                                // Perfetto UI 的 Android Logs 面板
+    realtime_ns: epoch_ns, pid: 4242, tid: 4243, uid: None,
+    priority: LogPriority::from_letter('W').unwrap(), tag: "Game", message: "low memory",
+}]);
+session.stop_and_write("out.pftrace")?;                              // 串流模式下檔案已寫好，這步只收尾
+```
+
+* `*_at` 的時間戳：裸 `u64` = SDK 時鐘（[`now_ns`]）；`Timestamp::realtime/boottime/monotonic` = 指定時鐘，
+  封包帶 `timestamp_clock_id`，由 trace processor 依 clock snapshot 換算。ATRACE 後端不吃指定時間戳。
+* `SessionConfig.clock_snapshot`：`None` = 本機時鐘（SDK 時鐘＋REALTIME，Linux 另有 MONOTONIC）；`Some` = 只寫這些，
+  主時鐘優先取 BOOTTIME。用自訂 snapshot 時，SDK 時鐘的事件只有在 snapshot 含該時鐘時才放得對。
+* 非 Linux 平台的 SDK 時鐘事件明確標成 MONOTONIC（不再借用 BOOTTIME），BOOTTIME 留給裝置時鐘。
+* `Track::process_of`／`thread_of`：描述 SDK 以外的 pid／tid；thread 上的第一個事件會一併帶出該 process 的描述（名稱）。
+* `android_logs`：`AndroidLogPacket`，`realtime_ns` 是 Unix epoch ns（Perfetto 的 Android log 一律用 REALTIME）。
+* `SessionConfig.output_file`：串流模式。`buffer_size_kb`／`ring_buffer` 不適用、`trace_bytes()` 回空，
+  寫檔錯誤看 `file_error()`。
+* 這些功能目前只有 Rust API，C API 尚未提供。
+
 ## C API
 
 見 `include/rperfetto_sdk.h`、`examples/c/c_demo.c`。

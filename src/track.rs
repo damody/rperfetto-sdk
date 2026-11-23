@@ -11,8 +11,8 @@ use std::sync::{OnceLock, RwLock};
 
 #[derive(Clone, Debug)]
 pub(crate) enum TrackKind {
-    Process,
-    Thread { tid: i32 },
+    Process { pid: i32 },
+    Thread { pid: i32, tid: i32 },
     Named,
     Counter,
 }
@@ -93,7 +93,65 @@ impl Track {
                 .clone()
                 .or_else(platform::process_name)
                 .unwrap_or_default();
-            register(uuid, TrackInfo { kind: TrackKind::Process, name, parent: None, unit_name: None });
+            register(uuid, TrackInfo { kind: TrackKind::Process { pid }, name, parent: None, unit_name: None });
+        }
+        Track { uuid }
+    }
+
+    /// The track of another process, e.g. an app on a device whose data is
+    /// being converted. `name` (if any) sets or updates the process name.
+    /// Thread tracks and counters can be nested under it.
+    pub fn process_of(pid: i32, name: Option<&str>) -> Track {
+        let uuid = process_uuid(pid);
+        let mut tracks = tracks().write().unwrap();
+        match tracks.get_mut(&uuid) {
+            Some(info) => {
+                if let Some(name) = name {
+                    if info.name != name {
+                        info.name = name.to_string();
+                    }
+                }
+            }
+            None => {
+                tracks.insert(
+                    uuid,
+                    TrackInfo {
+                        kind: TrackKind::Process { pid },
+                        name: name.unwrap_or_default().to_string(),
+                        parent: None,
+                        unit_name: None,
+                    },
+                );
+            }
+        }
+        Track { uuid }
+    }
+
+    /// The track of thread `tid` in process `pid` (another process, or this
+    /// one). Slices on it land on that thread's row; in a trace merged with a
+    /// system trace from the same device they line up with its sched data.
+    pub fn thread_of(pid: i32, tid: i32, name: Option<&str>) -> Track {
+        let uuid = thread_uuid(pid, tid);
+        let mut tracks = tracks().write().unwrap();
+        match tracks.get_mut(&uuid) {
+            Some(info) => {
+                if let Some(name) = name {
+                    if info.name != name {
+                        info.name = name.to_string();
+                    }
+                }
+            }
+            None => {
+                tracks.insert(
+                    uuid,
+                    TrackInfo {
+                        kind: TrackKind::Thread { pid, tid },
+                        name: name.unwrap_or_default().to_string(),
+                        parent: None,
+                        unit_name: None,
+                    },
+                );
+            }
         }
         Track { uuid }
     }
@@ -190,7 +248,7 @@ pub(crate) fn register_thread(pid: i32, tid: i32, name: &str) -> u64 {
     let uuid = thread_uuid(pid, tid);
     register(
         uuid,
-        TrackInfo { kind: TrackKind::Thread { tid }, name: name.to_string(), parent: None, unit_name: None },
+        TrackInfo { kind: TrackKind::Thread { pid, tid }, name: name.to_string(), parent: None, unit_name: None },
     );
     uuid
 }
@@ -198,16 +256,15 @@ pub(crate) fn register_thread(pid: i32, tid: i32, name: &str) -> u64 {
 /// Builds the `TrackDescriptor` for `uuid`.
 pub(crate) fn descriptor(uuid: u64) -> Option<TrackDescriptor> {
     let info = track_info(uuid)?;
-    let pid = platform::pid();
     let mut d = TrackDescriptor { uuid: Some(uuid), ..Default::default() };
     match info.kind {
-        TrackKind::Process => {
+        TrackKind::Process { pid } => {
             d.process = Some(ProcessDescriptor {
                 pid: Some(pid),
                 process_name: (!info.name.is_empty()).then(|| info.name.clone()),
             });
         }
-        TrackKind::Thread { tid } => {
+        TrackKind::Thread { pid, tid } => {
             d.thread = Some(ThreadDescriptor {
                 pid: Some(pid),
                 tid: Some(tid),
@@ -227,11 +284,21 @@ pub(crate) fn descriptor(uuid: u64) -> Option<TrackDescriptor> {
     Some(d)
 }
 
-/// `uuid` followed by its ancestors.
+/// `uuid` followed by its ancestors. A thread track is followed by its
+/// process's track when one was created ([`Track::process_of`]), so the
+/// process name reaches the trace with the first event on any of its threads.
 pub(crate) fn ancestry(uuid: u64) -> Vec<u64> {
     let mut v = vec![uuid];
     let mut cur = uuid;
-    while let Some(p) = track_info(cur).and_then(|i| i.parent) {
+    loop {
+        let parent = match track_info(cur) {
+            Some(TrackInfo { parent: Some(p), .. }) => Some(p),
+            Some(TrackInfo { kind: TrackKind::Thread { pid, .. }, .. }) => {
+                Some(process_uuid(pid)).filter(|p| track_info(*p).is_some())
+            }
+            _ => None,
+        };
+        let Some(p) = parent else { break };
         if v.contains(&p) {
             break;
         }

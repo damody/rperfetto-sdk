@@ -227,9 +227,10 @@ pub(crate) struct EventSpec<'a> {
 }
 
 impl ThreadWriter {
-    fn encode_event(&mut self, ts: u64, track_uuid: u64, ev: &EventSpec) {
+    fn encode_event(&mut self, ts: u64, clock: Option<u32>, track_uuid: u64, ev: &EventSpec) {
         let pkt = &mut self.pkt;
         pkt.timestamp = Some(ts);
+        pkt.timestamp_clock_id = clock;
         let te = pkt.track_event.as_mut().unwrap();
         te.track_uuid = Some(track_uuid);
         te.r#type = Some(match ev.phase {
@@ -270,7 +271,7 @@ impl ThreadWriter {
 
     /// Packets that must precede an event on `track_uuid` in a sequence whose
     /// state is `seq`: the sequence-start marker and missing descriptors.
-    fn preamble(seq: &mut SeqState, track_uuid: u64, ts: u64, out: &mut Vec<Vec<u8>>) {
+    fn preamble(seq: &mut SeqState, track_uuid: u64, ts: u64, clock: Option<u32>, out: &mut Vec<Vec<u8>>) {
         if !seq.started {
             seq.started = true;
             let p = TracePacket {
@@ -290,7 +291,12 @@ impl ThreadWriter {
         for uuid in track::ancestry(track_uuid).into_iter().rev() {
             if seq.emitted.insert(uuid) {
                 if let Some(d) = track::descriptor(uuid) {
-                    let p = TracePacket { timestamp: Some(ts), track_descriptor: Some(d), ..Default::default() };
+                    let p = TracePacket {
+                        timestamp: Some(ts),
+                        timestamp_clock_id: clock,
+                        track_descriptor: Some(d),
+                        ..Default::default()
+                    };
                     out.push(p.encode_to_vec());
                 }
             }
@@ -298,12 +304,29 @@ impl ThreadWriter {
         seq.last_track = track_uuid;
     }
 
-    pub(crate) fn emit(&mut self, sinks: u8, ts: u64, ev: &EventSpec) {
+    pub(crate) fn emit(&mut self, sinks: u8, ts: u64, clock: Option<u32>, ev: &EventSpec) {
         if self.id == 0 {
             return;
         }
         let track_uuid = ev.track_uuid.unwrap_or(self.thread_uuid);
-        self.encode_event(ts, track_uuid, ev);
+        self.encode_event(ts, clock, track_uuid, ev);
+        self.write_encoded(sinks, Some((track_uuid, ts, clock)));
+    }
+
+    /// Writes an already encoded packet (no track descriptors needed), e.g.
+    /// an `AndroidLogPacket`.
+    pub(crate) fn emit_raw(&mut self, sinks: u8, packet: &[u8]) {
+        if self.id == 0 {
+            return;
+        }
+        self.enc.clear();
+        self.enc.extend_from_slice(packet);
+        self.write_encoded(sinks, None);
+    }
+
+    /// Hands `self.enc` to the sinks, preceded by the descriptors `track`
+    /// `(uuid, ts, clock)` needs.
+    fn write_encoded(&mut self, sinks: u8, track: Option<(u64, u64, Option<u32>)>) {
         let mut pre: Vec<Vec<u8>> = Vec::new();
 
         if sinks & SINK_INPROC != 0 {
@@ -311,7 +334,9 @@ impl ThreadWriter {
                 if self.inproc.sync(gen, epoch) {
                     self.inproc_buf.clear();
                 }
-                Self::preamble(&mut self.inproc, track_uuid, ts, &mut pre);
+                if let Some((track_uuid, ts, clock)) = track {
+                    Self::preamble(&mut self.inproc, track_uuid, ts, clock, &mut pre);
+                }
                 for p in pre.drain(..) {
                     inprocess::frame_packet(&mut self.inproc_buf, &p, self.id);
                 }
@@ -326,7 +351,9 @@ impl ThreadWriter {
         if sinks & SINK_SYSTEM != 0 {
             if let Some(st) = system::active() {
                 self.sys.sync(&st);
-                Self::preamble(&mut self.sys.seq, track_uuid, ts, &mut pre);
+                if let Some((track_uuid, ts, clock)) = track {
+                    Self::preamble(&mut self.sys.seq, track_uuid, ts, clock, &mut pre);
+                }
                 for p in pre.drain(..) {
                     self.sys.write_packet(self.id, &p, &st);
                 }
@@ -359,7 +386,7 @@ pub(crate) fn emit_with_sinks(sinks: u8, ev: &EventSpec) {
     }
     let ts = platform::now_ns();
     if sinks & (SINK_INPROC | SINK_SYSTEM) != 0 {
-        with_writer(|w| w.emit(sinks, ts, ev));
+        with_writer(|w| w.emit(sinks, ts, platform::SDK_PACKET_CLOCK, ev));
     }
     if sinks & SINK_ATRACE != 0 {
         crate::atrace::emit(ev);
@@ -370,8 +397,15 @@ pub(crate) fn emit_with_sinks(sinks: u8, ev: &EventSpec) {
 /// [`platform::now_ns`]). Only the TrackEvent sinks (in-process, system) take
 /// explicit timestamps; ATRACE always stamps events itself and is skipped.
 #[inline]
-pub(crate) fn emit_with_sinks_at(sinks: u8, ts: u64, ev: &EventSpec) {
+pub(crate) fn emit_with_sinks_at(sinks: u8, ts: crate::Timestamp, ev: &EventSpec) {
     if sinks & (SINK_INPROC | SINK_SYSTEM) != 0 {
-        with_writer(|w| w.emit(sinks & (SINK_INPROC | SINK_SYSTEM), ts, ev));
+        with_writer(|w| w.emit(sinks & (SINK_INPROC | SINK_SYSTEM), ts.ns, ts.clock.packet_id(), ev));
+    }
+}
+
+/// Writes an encoded packet to the TrackEvent sinks in `sinks`.
+pub(crate) fn emit_raw_with_sinks(sinks: u8, packet: &[u8]) {
+    if sinks & (SINK_INPROC | SINK_SYSTEM) != 0 {
+        with_writer(|w| w.emit_raw(sinks & (SINK_INPROC | SINK_SYSTEM), packet));
     }
 }

@@ -28,6 +28,8 @@
 
 mod atrace;
 mod category;
+mod clock;
+mod log;
 mod event;
 pub mod ffi;
 mod inprocess;
@@ -40,8 +42,10 @@ mod track;
 mod writer;
 
 pub use category::{registered_categories, Category, CategoryFilter};
+pub use clock::{Clock, Timestamp};
+pub use log::{android_logs, LogEvent, LogPriority};
 pub use event::{Arg, ArgValue, CounterValue};
-pub use inprocess::{SessionConfig, SessionStats, TracingSession};
+pub use inprocess::{read_packets, Compression, SessionConfig, SessionStats, TracingSession, COMPRESS_CHUNK};
 pub use platform::now_ns;
 pub use prost;
 pub use track::{CounterTrack, Track};
@@ -310,46 +314,47 @@ pub fn slice_begin_with_flows(
 // Events with explicit timestamps
 //
 // For data that was sampled earlier (e.g. replaying recorded metrics into a
-// trace). `ts` uses the clock of [`now_ns`]; events on one track should be
+// trace). `ts` is a bare `u64` in the clock of [`now_ns`], or a [`Timestamp`]
+// in another clock (e.g. device REALTIME); events on one track should be
 // emitted in timestamp order. Only the in-process and system backends record
 // these; ATRACE cannot back-date events and ignores them.
 // ---------------------------------------------------------------------------
 
 /// [`slice_begin_on`] at timestamp `ts`.
 #[inline]
-pub fn slice_begin_on_at(cat: &'static Category, track: Track, ts: u64, name: &str, args: &[Arg]) {
+pub fn slice_begin_on_at(cat: &'static Category, track: Track, ts: impl Into<Timestamp>, name: &str, args: &[Arg]) {
     let s = cat.sinks() & SINK_PROTO;
     if s != 0 {
-        emit_with_sinks_at(s, ts, &spec(cat, Phase::Begin, Some(track.uuid), Some(name), args));
+        emit_with_sinks_at(s, ts.into(), &spec(cat, Phase::Begin, Some(track.uuid), Some(name), args));
     }
 }
 
 /// [`slice_end_on`] at timestamp `ts`.
 #[inline]
-pub fn slice_end_on_at(cat: &'static Category, track: Track, ts: u64) {
+pub fn slice_end_on_at(cat: &'static Category, track: Track, ts: impl Into<Timestamp>) {
     let s = cat.sinks() & SINK_PROTO;
     if s != 0 {
-        emit_with_sinks_at(s, ts, &spec(cat, Phase::End, Some(track.uuid), None, &[]));
+        emit_with_sinks_at(s, ts.into(), &spec(cat, Phase::End, Some(track.uuid), None, &[]));
     }
 }
 
 /// [`instant_on`] at timestamp `ts`.
 #[inline]
-pub fn instant_on_at(cat: &'static Category, track: Track, ts: u64, name: &str, args: &[Arg]) {
+pub fn instant_on_at(cat: &'static Category, track: Track, ts: impl Into<Timestamp>, name: &str, args: &[Arg]) {
     let s = cat.sinks() & SINK_PROTO;
     if s != 0 {
-        emit_with_sinks_at(s, ts, &spec(cat, Phase::Instant, Some(track.uuid), Some(name), args));
+        emit_with_sinks_at(s, ts.into(), &spec(cat, Phase::Instant, Some(track.uuid), Some(name), args));
     }
 }
 
 /// [`counter`] at timestamp `ts`.
 #[inline]
-pub fn counter_at(cat: &'static Category, track: CounterTrack, ts: u64, value: impl Into<CounterValue>) {
+pub fn counter_at(cat: &'static Category, track: CounterTrack, ts: impl Into<Timestamp>, value: impl Into<CounterValue>) {
     let s = cat.sinks() & SINK_PROTO;
     if s != 0 {
         let mut e = spec(cat, Phase::Counter, Some(track.uuid), None, &[]);
         e.counter = Some(value.into());
-        emit_with_sinks_at(s, ts, &e);
+        emit_with_sinks_at(s, ts.into(), &e);
     }
 }
 
