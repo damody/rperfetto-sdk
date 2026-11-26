@@ -34,7 +34,7 @@ fn query(tp: &PathBuf, trace: &PathBuf, sql: &str) -> Vec<String> {
 fn events_reach_traced() {
     let bin = std::env::var_os("PERFETTO_OUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/damody/work/perfetto-arm64/out/linux_release"));
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../perfetto-arm64/out/linux_release")));
     let (traced, perfetto, tp) = (bin.join("traced"), bin.join("perfetto"), bin.join("trace_processor_shell"));
     if !traced.exists() || !perfetto.exists() || !tp.exists() {
         eprintln!("perfetto binaries not found in {bin:?}; skipping");

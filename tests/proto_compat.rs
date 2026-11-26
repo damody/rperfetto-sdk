@@ -180,7 +180,7 @@ fn field_number(body: &str, field: &str) -> Option<u32> {
 fn field_numbers_match_perfetto_v53() {
     let root = std::env::var_os("PERFETTO_SRC")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/damody/work/perfetto-arm64"))
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../perfetto-arm64")))
         .join("protos/perfetto");
     if !root.exists() {
         eprintln!("perfetto sources not found; skipping");

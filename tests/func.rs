@@ -25,7 +25,7 @@ fn named() {
 fn tp_shell() -> Option<PathBuf> {
     let p = std::env::var_os("TRACE_PROCESSOR_SHELL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/damody/work/perfetto-arm64/out/linux_release/trace_processor_shell"));
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../perfetto-arm64/out/linux_release/trace_processor_shell")));
     p.exists().then_some(p)
 }
 
